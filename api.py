@@ -46,7 +46,7 @@ def get_db_connection():
 
 @app.after_request
 def security_headers(response):
-    response.headers["Content-Security-Policy"] = "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
