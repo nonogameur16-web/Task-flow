@@ -7,12 +7,16 @@ import time
 import json
 import uuid
 import os
+import database
 
 
 load_dotenv()
 app = Flask(__name__, static_folder="web", static_url_path="")
 app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "Data_base.db")
 
 #Couleur de mes themes 
 list_color = [
@@ -35,7 +39,7 @@ NOMBRE_MAX_STEPS = 20
 
 # Connexion commune à la base de données
 def get_db_connection():
-    con = sqlite3.connect("Data_base.db", timeout=10)
+    con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     return con
