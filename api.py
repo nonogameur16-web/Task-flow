@@ -50,6 +50,9 @@ TAILLE_MAX_TASK_TITLE = 70
 TAILLE_MAX_STEP_TITLE = 100
 TAILLE_MAX_NOTE = 500
 NOMBRE_MAX_STEPS = 20
+TAILLE_MAX_USERNAME = 50
+TAILLE_MIN_PASSWORD = 8
+TAILLE_MAX_PASSWORD = 128
 
 
 # Connexion commune à la base de données
@@ -898,7 +901,6 @@ def restore_list(list_id):
 
 # Création d'un utilisateur
 @app.route("/api/v1/auth/register", methods=["POST"])
-@login_required
 def register():
 
     if not request.is_json:
@@ -909,13 +911,24 @@ def register():
     if not isinstance(data, dict):
         return jsonify({"error": "JSON invalide"}), 400
 
-    # Récupération des informations
-    name = data.get("name")
+    # Récupération des informations ("username" envoyé par le front, "name" accepté aussi)
+    name = data.get("username", data.get("name"))
     password = data.get("password")
 
     # Vérification des champs
+    if not isinstance(name, str) or not isinstance(password, str):
+        return jsonify({"error": "Nom et mot de passe requis"}), 400
+
+    name = name.strip()
+
     if not name or not password:
         return jsonify({"error": "Nom et mot de passe requis"}), 400
+
+    if len(name) > TAILLE_MAX_USERNAME:
+        return jsonify({"error": "Nom d'utilisateur trop long"}), 400
+
+    if len(password) < TAILLE_MIN_PASSWORD or len(password) > TAILLE_MAX_PASSWORD:
+        return jsonify({"error": "Le mot de passe doit contenir au moins 8 caractères"}), 400
 
     # Connexion à la base de données
     con = get_db_connection()
@@ -1056,6 +1069,68 @@ def logout():
     session.clear()
 
     return jsonify({"message": "Déconnexion réussie"}), 200
+
+
+# Changement du mot de passe de l'utilisateur connecté
+@app.route("/api/v1/auth/change-password", methods=["POST"])
+@login_required
+def change_password():
+
+    if not request.is_json:
+        return jsonify({"error": "JSON requis"}), 415
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON invalide"}), 400
+
+    current_password = data.get("currentPassword")
+    new_password = data.get("newPassword")
+
+    if (
+        not isinstance(current_password, str) or not current_password
+        or not isinstance(new_password, str) or not new_password
+    ):
+        return jsonify({"error": "Mot de passe actuel et nouveau mot de passe requis"}), 400
+
+    if len(new_password) < TAILLE_MIN_PASSWORD or len(new_password) > TAILLE_MAX_PASSWORD:
+        return jsonify({"error": "Le nouveau mot de passe doit contenir au moins 8 caractères"}), 400
+
+    if new_password == current_password:
+        return jsonify({"error": "Le nouveau mot de passe doit être différent de l'actuel"}), 400
+
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+
+        cur.execute(
+            "SELECT ID, password FROM User WHERE ID = ?",
+            (session["user_id"],)
+        )
+        user = cur.fetchone()
+
+        if user is None:
+            session.clear()
+            return jsonify({"error": "Utilisateur introuvable"}), 401
+
+        # Vérification du mot de passe actuel (403 : la session, elle, reste valide)
+        try:
+            ph.verify(user["password"], current_password)
+        except VerifyMismatchError:
+            return jsonify({"error": "Mot de passe actuel incorrect"}), 403
+
+        cur.execute(
+            "UPDATE User SET password = ? WHERE ID = ?",
+            (ph.hash(new_password), user["ID"])
+        )
+
+        con.commit()
+
+        return jsonify({"message": "Mot de passe modifié"}), 200
+
+    finally:
+        con.close()
 
 
 

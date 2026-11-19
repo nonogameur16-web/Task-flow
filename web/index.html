@@ -14,6 +14,63 @@
   <aside id="detail" aria-label="Détail de la tâche" hidden></aside>
   <div id="toast" role="status" aria-live="polite"></div>
 
+  <!-- Paramètres du compte (ouvert depuis le bouton « Paramètres » de la barre latérale) -->
+  <div id="settings" class="s-overlay" hidden>
+    <div class="s-dialog" role="dialog" aria-modal="true" aria-labelledby="s-title">
+      <header class="s-head">
+        <h2 id="s-title">Paramètres</h2>
+        <button type="button" class="s-close" data-s-close aria-label="Fermer les paramètres">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+
+      <div class="s-body">
+        <div class="s-profile">
+          <span class="avatar avatar-lg" id="s-avatar" aria-hidden="true"></span>
+          <div class="s-profile-text">
+            <strong id="s-username"></strong>
+            <span>Compte personnel</span>
+          </div>
+        </div>
+
+        <section class="s-section" aria-labelledby="s-pw-title">
+          <h3 id="s-pw-title">Changer le mot de passe</h3>
+          <p class="s-hint">Saisissez votre mot de passe actuel, puis choisissez-en un nouveau.</p>
+          <div class="s-ok" id="s-ok" role="status" hidden></div>
+
+          <form novalidate id="s-pwform">
+            <div class="s-field">
+              <label for="s-cur">Mot de passe actuel</label>
+              <div class="s-input">
+                <input id="s-cur" name="current" type="password" autocomplete="current-password" placeholder="Votre mot de passe actuel">
+                <button type="button" class="s-eye" data-seye="s-cur">Afficher</button>
+              </div>
+              <div class="s-err" role="alert"></div>
+            </div>
+            <div class="s-field">
+              <label for="s-new">Nouveau mot de passe</label>
+              <div class="s-input">
+                <input id="s-new" name="next" type="password" autocomplete="new-password" placeholder="8 caractères minimum">
+                <button type="button" class="s-eye" data-seye="s-new">Afficher</button>
+              </div>
+              <div class="s-err" role="alert"></div>
+            </div>
+            <div class="s-field">
+              <label for="s-new2">Confirmer le nouveau mot de passe</label>
+              <input id="s-new2" name="next2" type="password" autocomplete="new-password" placeholder="Répéter le nouveau mot de passe">
+              <div class="s-err" role="alert"></div>
+            </div>
+            <div class="s-err s-form-err" role="alert"></div>
+            <div class="s-actions">
+              <button type="button" class="s-btn s-btn-ghost" data-s-close>Annuler</button>
+              <button type="submit" class="s-btn s-btn-primary">Modifier le mot de passe</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <!-- Écran de connexion (affiché par script.js tant que l'utilisateur n'est pas connecté) -->
   <div id="auth" hidden>
     <div class="a-shell">

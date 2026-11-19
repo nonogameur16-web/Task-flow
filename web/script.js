@@ -3,57 +3,48 @@
 
   // ---------- Authentification ----------
   // Session par cookie côté serveur : tous les fetch existants envoient le cookie tout seuls.
-  // Routes attendues : GET /api/v1/auth/me  ·  POST /api/v1/auth/{login,register,logout,forgot}
+  // Routes attendues : GET /api/v1/auth/me  ·  POST /api/v1/auth/{login,register,logout,forgot,change-password}
   const AUTH_API = '/api/v1/auth';
+  // Changement de mot de passe : POST { currentPassword, newPassword } (voir section « Paramètres »)
+  const CHANGE_PASSWORD_URL = AUTH_API + '/change-password';
   const $auth = document.getElementById('auth');
-  // Stockage du jeton CSRF
-  let csrfToken = null;
+  const $settings = document.getElementById('settings');
   const auth = { user: null };
-  const nativeFetch = window.fetch.bind(window);
+  const rawFetch = window.fetch.bind(window);
 
-  // Récupération du jeton CSRF auprès du serveur
-  async function refreshCsrfToken() {
-    const res = await nativeFetch(AUTH_API + '/csrf');
-
-    if (!res.ok) {
-      throw new Error('Impossible de récupérer le jeton CSRF.');
+  // Protection CSRF (Flask-WTF) : toute requête qui modifie des données doit envoyer le jeton
+  // récupéré sur GET /api/v1/auth/csrf, dans l'en-tête X-CSRFToken.
+  // Le jeton est lié à la session : on le redemande après connexion / déconnexion.
+  let csrfToken = null;
+  async function getCsrf(force) {
+    if (!csrfToken || force) {
+      const r = await rawFetch(AUTH_API + '/csrf', { credentials: 'same-origin' });
+      const d = await r.json().catch(() => ({}));
+      csrfToken = d.csrf_token || null;
     }
-
-    const data = await res.json();
-
-    if (!data.csrf_token) {
-      throw new Error('Le serveur n’a pas fourni de jeton CSRF.');
-    }
-
-    csrfToken = data.csrf_token;
+    return csrfToken;
   }
 
-  // Ajout automatique du jeton CSRF aux requêtes qui modifient des données.
-  window.fetch = async function (input, init = {}) {
-    const method = (init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
-    const options = { ...init };
+  async function nativeFetch(input, init) {
+    const opts = init ? { ...init } : {};
+    const method = String(opts.method || 'GET').toUpperCase();
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return rawFetch(input, opts);
 
-    if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) {
-      if (!csrfToken) {
-        await refreshCsrfToken();
-      }
+    const send = async (force) => {
+      const headers = new Headers(opts.headers || {});
+      const token = await getCsrf(force);
+      if (token) headers.set('X-CSRFToken', token);
+      return rawFetch(input, { ...opts, headers });
+    };
+    let res = await send(false);
+    if (res.status === 400) res = await send(true);   // jeton périmé : un seul nouvel essai
+    return res;
+  }
 
-      const headers = new Headers(input instanceof Request ? input.headers : undefined);
-
-      new Headers(init.headers || {}).forEach((value, key) => {
-        headers.set(key, value);
-      });
-
-      headers.set('X-CSRFToken', csrfToken);
-      options.headers = headers;
-    }
-
-    const res = await nativeFetch(input, options);
-
-    if (res.status === 401 && auth.user) {
-      endSession('Votre session a expiré. Reconnectez-vous.');
-    }
-
+  // Si le serveur répond 401 pendant l'utilisation (session expirée), retour à la connexion.
+  window.fetch = async function (input, init) {
+    const res = await nativeFetch(input, init);
+    if (res.status === 401 && auth.user) endSession('Votre session a expiré. Reconnectez-vous.');
     return res;
   };
 
@@ -107,14 +98,9 @@
     const btn = f.querySelector('.a-btn');
     btn.disabled = true;
     try {
-      const body = {};
-      if (kind === 'register') {
-          body.name = user.value.trim();
-      } else {
-          body.username = user.value.trim();
-      }
+      const body = { username: user.value.trim() };
       if (pass) body.password = pass.value;
-      const res = await fetch(AUTH_API + '/' + kind, {
+      const res = await nativeFetch(AUTH_API + '/' + kind, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -124,8 +110,6 @@
       if (res.ok) {
         if (kind === 'login') {
           f.reset();
-          // Flask réinitialise la session après la connexion : récupérer un nouveau jeton.
-          await refreshCsrfToken();
           await enterApp({ username: data.username || body.username });
         } else if (kind === 'register') {
           f.reset();
@@ -153,13 +137,15 @@
 
   function enterApp(user) {
     auth.user = user;
+    csrfToken = null;
     $auth.hidden = true;
-    sideUser.textContent = user.username;
+    updateAccountUI();
     return loadApp();
   }
 
   function endSession(msg) {
     auth.user = null;
+    csrfToken = null;
     state.lists = [];
     state.tasks = [];
     state.view = 'myday';
@@ -169,6 +155,9 @@
     $main.replaceChildren();
     $detail.replaceChildren();
     $detail.hidden = true;
+    document.body.classList.remove('sidebar-open');
+    $settings.hidden = true;
+    resetPwForm();
     $auth.querySelectorAll('form').forEach((f) => f.reset());
     authShow('login', msg);
   }
@@ -188,7 +177,9 @@
     chevron: '<path d="M6 9.5l6 6 6-6"/>',
     trash: '<path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l1 13h9l1-13"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
-    search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>'
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+    settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+    logout: '<path d="M10 4.5H6.5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1H10"/><path d="M15 8l4 4-4 4M19 12H9.5"/>'
   };
 
   const SMART = [
@@ -406,20 +397,139 @@
   const newListInput = el('input', { type: 'text', placeholder: 'Nouvelle liste', 'aria-label': 'Nouvelle liste', autocomplete: 'off' });
   const newListForm = el('form', { class: 'new-list' }, el('span', { class: 'nav-icon' }, icon('plus')), newListInput);
 
-  // Utilisateur connecté + bouton de déconnexion (bas de la barre latérale)
+  // Carte du compte (bas de la barre latérale) : avatar, nom, Paramètres, Se déconnecter
+  const sideAvatar = el('span', { class: 'avatar', 'aria-hidden': 'true' });
   const sideUser = el('span', { class: 'side-user' });
-  const logoutBtn = el('button', { class: 'side-logout', type: 'button' }, 'Se déconnecter');
-  const sideFoot = el('div', { class: 'side-foot' }, sideUser, logoutBtn);
+  const sideAccount = el('div', { class: 'side-account' },
+    sideAvatar,
+    el('div', { class: 'side-id' }, sideUser, el('span', { class: 'side-role', text: 'Compte connecté' })));
+  const settingsBtn = el('button', { class: 'side-btn', type: 'button' },
+    icon('settings'), el('span', { text: 'Paramètres' }));
+  const logoutBtn = el('button', { class: 'side-btn is-logout', type: 'button' },
+    icon('logout'), el('span', { text: 'Déconnexion' }));
+  const sideFoot = el('div', { class: 'side-foot' },
+    sideAccount, el('div', { class: 'side-actions' }, settingsBtn, logoutBtn));
   logoutBtn.addEventListener('click', async () => {
+    try { await nativeFetch(AUTH_API + '/logout', { method: 'POST' }); } catch (err) { console.error(err); }
+    endSession();
+  });
+
+  function updateAccountUI() {
+    const name = (auth.user && auth.user.username) || '';
+    const initial = name.trim().charAt(0).toUpperCase() || '?';
+    sideUser.textContent = name;
+    sideAvatar.textContent = initial;
+    document.getElementById('s-username').textContent = name;
+    document.getElementById('s-avatar').textContent = initial;
+  }
+
+  // ---------- Paramètres : changer son mot de passe ----------
+  const $pwForm = document.getElementById('s-pwform');
+  const $sOk = document.getElementById('s-ok');
+  let settingsOpener = null;
+
+  function resetPwForm() {
+    $pwForm.reset();
+    $pwForm.querySelectorAll('.s-err').forEach((x) => { x.textContent = ''; });
+    $pwForm.querySelectorAll('input').forEach((i) => { i.removeAttribute('aria-invalid'); i.type = 'password'; });
+    $pwForm.querySelectorAll('[data-seye]').forEach((b) => { b.textContent = 'Afficher'; });
+    $sOk.hidden = true;
+    $sOk.textContent = '';
+  }
+
+  function openSettings() {
+    settingsOpener = document.activeElement;
+    document.body.classList.remove('sidebar-open');
+    resetPwForm();
+    $settings.hidden = false;
+    document.getElementById('s-cur').focus();
+  }
+
+  function closeSettings() {
+    if ($settings.hidden) return;
+    $settings.hidden = true;
+    resetPwForm();
+    if (settingsOpener && settingsOpener.isConnected) settingsOpener.focus();
+    settingsOpener = null;
+  }
+
+  settingsBtn.addEventListener('click', openSettings);
+  $settings.querySelectorAll('[data-s-close]').forEach((b) => b.addEventListener('click', closeSettings));
+  $settings.addEventListener('mousedown', (e) => { if (e.target === $settings) closeSettings(); });
+
+  document.addEventListener('keydown', (e) => {
+    if ($settings.hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeSettings(); return; }
+    if (e.key === 'Tab') {   // garde le focus dans la fenêtre
+      const f = [...$settings.querySelectorAll('button, input')].filter((x) => !x.disabled && x.offsetParent !== null);
+      if (!f.length) return;
+      const first = f[0];
+      const last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+
+  $settings.querySelectorAll('[data-seye]').forEach((b) => b.addEventListener('click', () => {
+    const input = document.getElementById(b.dataset.seye);
+    const hidden = input.type === 'password';
+    input.type = hidden ? 'text' : 'password';
+    b.textContent = hidden ? 'Masquer' : 'Afficher';
+  }));
+
+  function pwSetErr(input, text) {
+    input.setAttribute('aria-invalid', 'true');
+    input.closest('.s-field').querySelector('.s-err').textContent = text;
+  }
+
+  $pwForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $pwForm.querySelectorAll('.s-err').forEach((x) => { x.textContent = ''; });
+    $pwForm.querySelectorAll('input').forEach((i) => i.removeAttribute('aria-invalid'));
+    $sOk.hidden = true;
+
+    const cur = $pwForm.elements.current;
+    const next = $pwForm.elements.next;
+    const next2 = $pwForm.elements.next2;
+    const formErr = $pwForm.querySelector('.s-form-err');
+    let valid = true;
+
+    if (!cur.value) { pwSetErr(cur, 'Entrez votre mot de passe actuel.'); valid = false; }
+    if (!next.value) { pwSetErr(next, 'Entrez un nouveau mot de passe.'); valid = false; }
+    else if (next.value.length < 8) { pwSetErr(next, 'Utilisez au moins 8 caractères.'); valid = false; }
+    else if (next.value === cur.value) { pwSetErr(next, "Le nouveau mot de passe doit être différent de l'actuel."); valid = false; }
+    else if (next.value !== next2.value) { pwSetErr(next2, 'Les mots de passe ne sont pas identiques.'); valid = false; }
+    if (!valid) { $pwForm.querySelector('[aria-invalid="true"]').focus(); return; }
+
+    const btn = $pwForm.querySelector('.s-btn-primary');
+    btn.disabled = true;
     try {
-      await fetch(AUTH_API + '/logout', { method: 'POST' });
+      // nativeFetch : un 401 ici veut dire « mauvais mot de passe actuel », pas « session expirée ».
+      const res = await nativeFetch(CHANGE_PASSWORD_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword: cur.value, newPassword: next.value })
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        resetPwForm();
+        $sOk.textContent = 'Votre mot de passe a bien été modifié.';
+        $sOk.hidden = false;
+      } else if (res.status === 401 || res.status === 403) {
+        pwSetErr(cur, 'Mot de passe actuel incorrect.');
+        cur.focus();
+      } else if (res.status === 429) {
+        formErr.textContent = 'Trop de tentatives. Réessayez dans quelques minutes.';
+      } else {
+        formErr.textContent = data.error || 'Une erreur est survenue. Réessayez.';
+      }
     } catch (err) {
       console.error(err);
+      formErr.textContent = 'Serveur injoignable. Vérifiez votre connexion.';
+    } finally {
+      btn.disabled = false;
     }
-
-    // La déconnexion réinitialise la session côté serveur.
-    csrfToken = null;
-    endSession();
   });
 
   const els = { header: null, scroll: null, add: null };
@@ -462,7 +572,10 @@
         el('input', { class: 'view-title-input', type: 'text', 'aria-label': 'Nom de la liste', value: list.name, autocomplete: 'off' }));
     } else {
       const title = q ? 'Résultats pour « ' + q + ' »' : viewLabel(state.view);
+      const greet = (state.view == 'myday' && !q && auth.user && auth.user.username)
+        ? el('p', { class: 'view-greeting', text: 'Bonjour, ' + auth.user.username }) : null;
       titleWrap = el('div', { class: 'view-title-wrap' },
+        greet,
         el('h1', { class: 'view-title', text: title }),
         (state.view == 'myday' && !q) ? el('p', { class: 'view-date', text: DATE_LONG.format(new Date()) }) : null);
     }
@@ -1515,9 +1628,6 @@ document.addEventListener('focusin', (e) => {
   // Au chargement : session déjà ouverte ? sinon écran de connexion.
   async function init() {
     try {
-      // Obtenir le jeton avant toute requête qui pourrait modifier des données.
-      await refreshCsrfToken();
-
       const res = await nativeFetch(AUTH_API + '/me');
       if (res.ok) {
         await enterApp(await res.json());

@@ -1,5 +1,8 @@
 import sqlite3
-con = sqlite3.connect("Data_base.db")
+import os
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data_base.db")
+con = sqlite3.connect(DB_PATH)
 con.execute("PRAGMA foreign_keys = ON")
 
 cur = con.cursor()
