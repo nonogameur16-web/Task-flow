@@ -1,7 +1,11 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, session
 from werkzeug.exceptions import HTTPException
 from datetime import datetime
 from dotenv import load_dotenv
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+from functools import wraps
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 import sqlite3
 import time
 import json
@@ -11,12 +15,23 @@ import database
 
 
 load_dotenv()
+ph = PasswordHasher()
 app = Flask(__name__, static_folder="web", static_url_path="")
 app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+# Sécurisation des cookies de session
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = False
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "Data_base.db")
+app.secret_key = os.getenv("SECRET_KEY")
+if not app.secret_key:
+    raise RuntimeError("La variable SECRET_KEY est absente du fichier .env")
+csrf = CSRFProtect(app)
+
 
 #Couleur de mes themes 
 list_color = [
@@ -44,6 +59,27 @@ def get_db_connection():
     con.execute("PRAGMA foreign_keys = ON")
     return con
 
+
+# Vérifier que l'utilisateur est connecté
+def login_required(view):
+
+    @wraps(view)
+    def wrapped_view(*args, **kwargs):
+
+        if "user_id" not in session:
+            return jsonify({"error": "Authentification requise"}), 401
+
+        return view(*args, **kwargs)
+
+    return wrapped_view
+
+
+# Récupération du jeton CSRF
+@app.route("/api/v1/auth/csrf", methods=["GET"])
+def get_csrf_token():
+    return jsonify({"csrf_token": generate_csrf()})
+
+
 @app.after_request
 def security_headers(response):
     response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
@@ -57,16 +93,22 @@ def index():
 
 # Récupérer les listes
 @app.route("/api/v1/lists", methods=["GET"])
+@login_required
 def get_lists():
+
     con = get_db_connection()
+    cur = con.cursor()
 
     try:
-        cur = con.cursor()
+        user_id = session["user_id"]
+
         cur.execute(
-            "SELECT id, name, theme FROM list WHERE is_deleted = 0"
+            "SELECT id, name, theme FROM list WHERE is_deleted = 0 AND user_id = ?",
+            (user_id,)
         )
 
         lists = [dict(row) for row in cur.fetchall()]
+
         return jsonify(lists)
 
     finally:
@@ -75,8 +117,10 @@ def get_lists():
 
 # Créer une liste
 @app.route("/api/v1/lists", methods=["POST"])
+@login_required
 def create_list():
     data = request.get_json(silent=True)
+    user_id = session["user_id"]
 
     if not isinstance(data, dict):
         return jsonify("error"), 400
@@ -101,10 +145,10 @@ def create_list():
         cur = con.cursor()
         cur.execute(
             """
-            INSERT INTO list (name, theme)
-            VALUES (?, ?)
+            INSERT INTO list (name, theme, user_id)
+            VALUES (?, ?, ?)
             """,
-            (name, theme)
+            (name, theme, user_id)
         )
 
         list_id = cur.lastrowid
@@ -125,6 +169,7 @@ def create_list():
 
 # Créer une tâche
 @app.route("/api/v1/tasks", methods=["POST"])
+@login_required
 def creat_task():
     data = request.get_json(silent=True)
 
@@ -176,11 +221,12 @@ def creat_task():
 
     try:
         cur = con.cursor()
+        user_id = session["user_id"] 
 
         if list_id is not None:
             cur.execute(
-                "SELECT id, is_deleted FROM list WHERE id = ?",
-                (list_id,)
+                "SELECT id, is_deleted FROM list WHERE id = ? AND user_id = ?",
+                (list_id, user_id) 
             )
 
             destination_list = cur.fetchone()
@@ -190,14 +236,13 @@ def creat_task():
 
             if destination_list["is_deleted"] == 1:
                 return jsonify("error"), 404
-            
         cur.execute(
             """
             INSERT INTO task
-                (title, done, important, myDay, due, listId, createdAt)
-            VALUES (?, 0, ?, ?, ?, ?, ?)
+                (title, done, important, myDay, due, listId, createdAt, user_id)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?)
             """,
-            (title, important, my_day, due, list_id, created_at)
+            (title, important, my_day, due, list_id, created_at, user_id)
         )
 
         task_id = cur.lastrowid
@@ -222,12 +267,17 @@ def creat_task():
 
 # Récupérer les tâches
 @app.route("/api/v1/tasks", methods=["GET"])
+@login_required
 def get_tasks():
     con = get_db_connection()
 
     try:
         cur = con.cursor()
-        cur.execute("SELECT * FROM task WHERE is_deleted = 0")
+        user_id = session["user_id"] 
+
+        cur.execute("SELECT * FROM task WHERE is_deleted = 0 AND user_id = ?",
+        (user_id,)            
+        )
 
         tasks = [dict(row) for row in cur.fetchall()]
         return jsonify(tasks)
@@ -238,6 +288,7 @@ def get_tasks():
 
 # Modifier une tâche
 @app.route("/api/v1/tasks/<int:task_id>", methods=["PATCH"])
+@login_required
 def update_task(task_id):
     data = request.get_json(silent=True)
 
@@ -297,7 +348,11 @@ def update_task(task_id):
 
     try:
         cur = con.cursor()
-        cur.execute("SELECT * FROM task WHERE id = ?", (task_id,))
+        user_id = session["user_id"] 
+        cur.execute(
+            "SELECT * FROM task WHERE id = ? AND user_id = ?",
+            (task_id, user_id)
+        )
         task = cur.fetchone()
 
         if task is None:
@@ -307,7 +362,7 @@ def update_task(task_id):
             return jsonify("error"), 404
 
         if "listId" in data and list_id is not None:
-            cur.execute("SELECT id FROM list WHERE id = ? AND is_deleted = 0", (list_id,))
+            cur.execute("SELECT id FROM list WHERE id = ? AND is_deleted = 0 AND user_id = ?", (list_id, user_id))
 
             if cur.fetchone() is None:
                 return jsonify("error"), 404
@@ -332,7 +387,7 @@ def update_task(task_id):
                 due = ?,
                 listId = ?,
                 note = ?
-            WHERE id = ?
+            WHERE id = ? AND user_id = ?
             """,
             (
                 new_title,
@@ -342,7 +397,8 @@ def update_task(task_id):
                 new_due,
                 new_list_id,
                 new_note,
-                task_id
+                task_id,
+                user_id
             )
         )
 
@@ -374,20 +430,22 @@ def update_task(task_id):
 
 # Supprimer une tâche
 @app.route("/api/v1/tasks/<int:task_id>", methods=["DELETE"])
+@login_required
 def delete_tasks(task_id):
     con = get_db_connection()
 
     try:
         cur = con.cursor()
         deleted_at = int(time.time() * 1000)
+        user_id = session["user_id"] 
 
         cur.execute(
             """
             UPDATE task
             SET is_deleted = 1, deletedAt = ?
-            WHERE id = ? AND is_deleted = 0
+            WHERE id = ? AND is_deleted = 0 AND user_id = ?
             """,
-            (deleted_at, task_id)
+            (deleted_at, task_id, user_id)
         )
 
         if cur.rowcount == 0:
@@ -406,14 +464,16 @@ def delete_tasks(task_id):
 
 # Supprimer une liste et les tâches qui lui sont associées
 @app.route("/api/v1/lists/<int:list_id>", methods=["DELETE"])
+@login_required
 def delete_list(list_id):
     con = get_db_connection()
+    user_id = session["user_id"] 
 
     try:
         cur = con.cursor()
         cur.execute(
-            "SELECT id FROM list WHERE id = ? AND is_deleted = 0",
-            (list_id,)
+            "SELECT id FROM list WHERE id = ? AND is_deleted = 0 AND user_id = ?",
+            (list_id, user_id)
         )
 
         liste = cur.fetchone()
@@ -427,18 +487,18 @@ def delete_list(list_id):
             """
             UPDATE task
             SET is_deleted = 1, deletedAt = ?
-            WHERE listId = ? AND is_deleted = 0
+            WHERE listId = ? AND is_deleted = 0 AND user_id = ?
             """,
-            (deleted_at, list_id)
+            (deleted_at, list_id, user_id)
         )
 
         cur.execute(
             """
             UPDATE list
             SET is_deleted = 1, deletedAt = ?
-            WHERE id = ? AND is_deleted = 0
+            WHERE id = ? AND is_deleted = 0 AND user_id = ? 
             """,
-            (deleted_at, list_id)
+            (deleted_at, list_id, user_id)
         )
 
         if cur.rowcount == 0:
@@ -457,8 +517,10 @@ def delete_list(list_id):
 
 # Créer une sous-tâche
 @app.route("/api/v1/tasks/<int:task_id>/steps", methods=["POST"])
+@login_required
 def create_step(task_id):
     data = request.get_json(silent=True)
+    user_id = session["user_id"] 
 
     if not isinstance(data, dict):
         return jsonify("error"), 400
@@ -479,8 +541,8 @@ def create_step(task_id):
         cur = con.cursor()
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
-            "SELECT steps FROM task WHERE id = ? AND is_deleted = 0",
-            (task_id,)
+            "SELECT steps FROM task WHERE id = ? AND is_deleted = 0 AND user_id = ?",
+            (task_id, user_id)
         )
 
         task = cur.fetchone()
@@ -503,8 +565,8 @@ def create_step(task_id):
         steps_json = json.dumps(steps)
 
         cur.execute(
-            "UPDATE task SET steps = ? WHERE id = ?",
-            (steps_json, task_id)
+            "UPDATE task SET steps = ? WHERE id = ? AND user_id = ?",
+            (steps_json, task_id, user_id)
         )
 
         con.commit()
@@ -524,8 +586,10 @@ def create_step(task_id):
 
 # Modifier une liste
 @app.route("/api/v1/lists/<int:list_id>", methods=["PATCH"])
+@login_required
 def update_list(list_id):
     data = request.get_json(silent=True)
+    user_id = session["user_id"] 
 
     if not isinstance(data, dict) or not data:
         return jsonify("error"), 400
@@ -550,7 +614,7 @@ def update_list(list_id):
 
         cur.execute("BEGIN IMMEDIATE")
 
-        cur.execute("SELECT id, is_deleted FROM list WHERE id = ?", (list_id,))
+        cur.execute("SELECT id, is_deleted FROM list WHERE id = ? AND user_id = ?", (list_id, user_id))
         liste = cur.fetchone()
 
         if liste is None:
@@ -560,8 +624,8 @@ def update_list(list_id):
             return jsonify("error"), 404
 
         cur.execute(
-            "UPDATE list SET name = ? WHERE id = ?",
-            (name, list_id)
+            "UPDATE list SET name = ? WHERE id = ? AND user_id = ?",
+            (name, list_id, user_id)
         )
 
         con.commit()
@@ -582,8 +646,10 @@ def update_list(list_id):
 
 # Modifier une sous-tâche
 @app.route("/api/v1/tasks/<int:id>/steps/<stepId>", methods=["PATCH"])
+@login_required
 def edit_steps(id, stepId):
     data = request.get_json(silent=True)
+    user_id = session["user_id"] 
 
     if (
         not isinstance(data, dict)
@@ -612,7 +678,7 @@ def edit_steps(id, stepId):
     try:
         cur = con.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        cur.execute("SELECT steps, is_deleted FROM task WHERE id = ?", (id,))
+        cur.execute("SELECT steps, is_deleted FROM task WHERE id = ? AND user_id = ?", (id, user_id))
         task = cur.fetchone()
 
         if task is None:
@@ -639,8 +705,8 @@ def edit_steps(id, stepId):
         steps_json = json.dumps(steps)
 
         cur.execute(
-            "UPDATE task SET steps = ? WHERE id = ?",
-            (steps_json, id)
+            "UPDATE task SET steps = ? WHERE id = ? AND user_id = ?",
+            (steps_json, id, user_id)
         )
 
         con.commit()
@@ -661,13 +727,15 @@ def edit_steps(id, stepId):
 
 # Supprimer une sous-tâche
 @app.route("/api/v1/tasks/<int:id>/steps/<stepId>", methods=["DELETE"])
+@login_required
 def sup_step(id, stepId):
     con = get_db_connection()
+    user_id = session["user_id"] 
 
     try:
         cur = con.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        cur.execute("SELECT steps, is_deleted FROM task WHERE id = ?", (id,))
+        cur.execute("SELECT steps, is_deleted FROM task WHERE id = ? AND user_id = ?", (id, user_id))
         task = cur.fetchone()
 
         if task is None:
@@ -691,8 +759,8 @@ def sup_step(id, stepId):
         steps_json = json.dumps(steps)
 
         cur.execute(
-            "UPDATE task SET steps = ? WHERE id = ?",
-            (steps_json, id)
+            "UPDATE task SET steps = ? WHERE id = ? AND user_id = ?",
+            (steps_json, id, user_id)
         )
 
         con.commit()
@@ -708,7 +776,9 @@ def sup_step(id, stepId):
 
 # Restaurer une tâche
 @app.route("/api/v1/tasks/<int:task_id>/restore", methods=["POST"])
+@login_required
 def restore_task(task_id):
+    user_id = session["user_id"] 
 
     if not request.is_json:
         return jsonify({"error": "JSON requis"}), 415
@@ -723,8 +793,8 @@ def restore_task(task_id):
     try:
         cur = con.cursor()
         cur.execute(
-            "SELECT * FROM task WHERE id = ? AND is_deleted = 1",
-            (task_id,)
+            "SELECT * FROM task WHERE id = ? AND is_deleted = 1 AND user_id = ?",
+            (task_id, user_id)
         )
 
         task = cur.fetchone()
@@ -736,14 +806,14 @@ def restore_task(task_id):
             """
             UPDATE task
             SET is_deleted = 0, deletedAt = NULL
-            WHERE id = ? AND is_deleted = 1
+            WHERE id = ? AND is_deleted = 1 AND user_id = ?
             """,
-            (task_id,)
+            (task_id, user_id)
         )
 
         cur.execute(
-            "SELECT * FROM task WHERE id = ?",
-            (task_id,)
+            "SELECT * FROM task WHERE id = ? AND user_id = ?",
+            (task_id, user_id)
         )
 
         restored_task = cur.fetchone()
@@ -761,7 +831,9 @@ def restore_task(task_id):
 
 # Restaurer une liste et les tâches supprimées avec elle
 @app.route("/api/v1/lists/<int:list_id>/restore", methods=["POST"])
+@login_required
 def restore_list(list_id):
+    user_id = session["user_id"] 
 
     if not request.is_json:
         return jsonify({"error": "JSON requis"}), 415
@@ -776,8 +848,8 @@ def restore_list(list_id):
     try:
         cur = con.cursor()
         cur.execute(
-            "SELECT * FROM list WHERE id = ? AND is_deleted = 1",
-            (list_id,)
+            "SELECT * FROM list WHERE id = ? AND is_deleted = 1 AND user_id = ?",
+            (list_id, user_id)
         )
 
         liste = cur.fetchone()
@@ -792,22 +864,23 @@ def restore_list(list_id):
             WHERE listId = ?
               AND is_deleted = 1
               AND deletedAt = ?
+              AND user_id = ?
             """,
-            (list_id, liste["deletedAt"])
+            (list_id, liste["deletedAt"], user_id)
         )
 
         cur.execute(
             """
             UPDATE list
             SET is_deleted = 0, deletedAt = NULL
-            WHERE id = ? AND is_deleted = 1
+            WHERE id = ? AND is_deleted = 1 AND user_id = ?
             """,
-            (list_id,)
+            (list_id, user_id)
         )
 
         cur.execute(
-            "SELECT * FROM list WHERE id = ?",
-            (list_id,)
+            "SELECT * FROM list WHERE id = ? AND user_id = ?",
+            (list_id, user_id)
         )
 
         restored_list = cur.fetchone()
@@ -821,6 +894,169 @@ def restore_list(list_id):
 
     finally:
         con.close()
+
+
+# Création d'un utilisateur
+@app.route("/api/v1/auth/register", methods=["POST"])
+@login_required
+def register():
+
+    if not request.is_json:
+        return jsonify({"error": "JSON requis"}), 415
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON invalide"}), 400
+
+    # Récupération des informations
+    name = data.get("name")
+    password = data.get("password")
+
+    # Vérification des champs
+    if not name or not password:
+        return jsonify({"error": "Nom et mot de passe requis"}), 400
+
+    # Connexion à la base de données
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+
+        # Vérification du nom d'utilisateur
+        cur.execute(
+            "SELECT ID FROM User WHERE name = ?",
+            (name,)
+        )
+        user = cur.fetchone()
+
+        if user is not None:
+            return jsonify({"error": "Ce nom d'utilisateur existe déjà"}), 409
+
+        # Hachage du mot de passe
+        hashed_password = ph.hash(password)
+
+        # Enregistrement du nouvel utilisateur
+        cur.execute(
+            "INSERT INTO User (name, password) VALUES (?, ?)",
+            (name, hashed_password)
+        )
+
+        con.commit()
+
+        return jsonify({"message": "Utilisateur créé avec succès"}), 201
+
+    finally:
+        con.close()
+
+
+# Connexion d'un utilisateur
+@app.route("/api/v1/auth/login", methods=["POST"])
+def login():
+
+    # Vérification du format JSON
+    if not request.is_json:
+        return jsonify({"error": "JSON requis"}), 415
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON invalide"}), 400
+
+    # Récupération des informations
+    name = data.get("username")
+    password = data.get("password")
+
+    # Vérification des champs
+    if not name or not password:
+        return jsonify({"error": "Nom et mot de passe requis"}), 400
+
+    # Connexion à la base de données
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+
+        # Recherche de l'utilisateur
+        cur.execute(
+            "SELECT ID, name, password FROM User WHERE name = ?",
+            (name,)
+        )
+
+        user = cur.fetchone()
+
+        # Vérification de l'existence de l'utilisateur
+        if user is None:
+            return jsonify({"error": "Identifiants incorrects"}), 401
+
+        # Vérification du mot de passe
+        try:
+            ph.verify(user["password"], password)
+        except VerifyMismatchError:
+            return jsonify({"error": "Identifiants incorrects"}), 401
+
+        # Vérification si le hachage doit être actualisé
+        if ph.check_needs_rehash(user["password"]):
+            new_hash = ph.hash(password)
+
+            cur.execute(
+                "UPDATE User SET password = ? WHERE ID = ?",
+                (new_hash, user["ID"])
+            )
+
+            con.commit()
+
+        # Création de la session
+        session.clear()
+        session["user_id"] = user["ID"]
+
+        return jsonify({
+            "message": "Connexion réussie",
+            "username": user["name"]
+        }), 200
+
+    finally:
+        con.close()
+
+
+# Vérifier si un utilisateur est connecté
+@app.route("/api/v1/auth/me", methods=["GET"])
+def get_current_user():
+
+    if "user_id" not in session:
+        return jsonify({"error": "Non connecté"}), 401
+
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+
+        # Recherche de l'utilisateur connecté
+        cur.execute(
+            "SELECT ID, name FROM User WHERE ID = ?",
+            (session["user_id"],)
+        )
+
+        user = cur.fetchone()
+
+        if user is None:
+            session.clear()
+            return jsonify({"error": "Utilisateur introuvable"}), 401
+
+        return jsonify({"username": user["name"]}), 200
+
+    finally:
+        con.close()
+
+
+# Déconnexion d'un utilisateur
+@app.route("/api/v1/auth/logout", methods=["POST"])
+def logout():
+
+    session.clear()
+
+    return jsonify({"message": "Déconnexion réussie"}), 200
+
 
 
 # Gestion des erreurs HTTP 

@@ -1,6 +1,178 @@
 (function () {
   'use strict';
 
+  // ---------- Authentification ----------
+  // Session par cookie côté serveur : tous les fetch existants envoient le cookie tout seuls.
+  // Routes attendues : GET /api/v1/auth/me  ·  POST /api/v1/auth/{login,register,logout,forgot}
+  const AUTH_API = '/api/v1/auth';
+  const $auth = document.getElementById('auth');
+  // Stockage du jeton CSRF
+  let csrfToken = null;
+  const auth = { user: null };
+  const nativeFetch = window.fetch.bind(window);
+
+  // Récupération du jeton CSRF auprès du serveur
+  async function refreshCsrfToken() {
+    const res = await nativeFetch(AUTH_API + '/csrf');
+
+    if (!res.ok) {
+      throw new Error('Impossible de récupérer le jeton CSRF.');
+    }
+
+    const data = await res.json();
+
+    if (!data.csrf_token) {
+      throw new Error('Le serveur n’a pas fourni de jeton CSRF.');
+    }
+
+    csrfToken = data.csrf_token;
+  }
+
+  // Ajout automatique du jeton CSRF aux requêtes qui modifient des données.
+  window.fetch = async function (input, init = {}) {
+    const method = (init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    const options = { ...init };
+
+    if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) {
+      if (!csrfToken) {
+        await refreshCsrfToken();
+      }
+
+      const headers = new Headers(input instanceof Request ? input.headers : undefined);
+
+      new Headers(init.headers || {}).forEach((value, key) => {
+        headers.set(key, value);
+      });
+
+      headers.set('X-CSRFToken', csrfToken);
+      options.headers = headers;
+    }
+
+    const res = await nativeFetch(input, options);
+
+    if (res.status === 401 && auth.user) {
+      endSession('Votre session a expiré. Reconnectez-vous.');
+    }
+
+    return res;
+  };
+
+  function authShow(id, msg) {
+    $auth.querySelectorAll('.a-view').forEach((v) => { v.hidden = v.id !== 'a-' + id; });
+    $auth.querySelectorAll('.a-err').forEach((e) => { e.textContent = ''; });
+    $auth.querySelectorAll('input').forEach((i) => i.removeAttribute('aria-invalid'));
+    const ok = document.getElementById('a-ok');
+    ok.hidden = !msg;
+    ok.textContent = msg || '';
+    $auth.hidden = false;
+    const first = $auth.querySelector('#a-' + id + ' input');
+    if (first) first.focus();
+  }
+
+  function authSetErr(input, text) {
+    input.setAttribute('aria-invalid', 'true');
+    input.closest('.a-field').querySelector('.a-err').textContent = text;
+  }
+
+  $auth.querySelectorAll('[data-go]').forEach((b) =>
+    b.addEventListener('click', () => authShow(b.dataset.go)));
+
+  $auth.querySelectorAll('[data-eye]').forEach((b) => b.addEventListener('click', () => {
+    const input = document.getElementById(b.dataset.eye);
+    const hidden = input.type === 'password';
+    input.type = hidden ? 'text' : 'password';
+    b.textContent = hidden ? 'Masquer' : 'Afficher';
+  }));
+
+  $auth.querySelectorAll('form').forEach((f) => f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    f.querySelectorAll('.a-err').forEach((x) => { x.textContent = ''; });
+    f.querySelectorAll('input').forEach((i) => i.removeAttribute('aria-invalid'));
+
+    const kind = f.dataset.form;
+    const user = f.elements.user;
+    const pass = f.elements.pass;
+    const pass2 = f.elements.pass2;
+    const formErr = f.querySelector('.a-form-err');
+    let valid = true;
+
+    if (!user.value.trim()) { authSetErr(user, "Entrez votre nom d'utilisateur."); valid = false; }
+    if (pass && !pass.value) { authSetErr(pass, 'Entrez votre mot de passe.'); valid = false; }
+    if (kind === 'register' && pass.value) {
+      if (pass.value.length < 8) { authSetErr(pass, 'Utilisez au moins 8 caractères.'); valid = false; }
+      else if (pass.value !== pass2.value) { authSetErr(pass2, 'Les mots de passe ne sont pas identiques.'); valid = false; }
+    }
+    if (!valid) { f.querySelector('[aria-invalid="true"]').focus(); return; }
+
+    const btn = f.querySelector('.a-btn');
+    btn.disabled = true;
+    try {
+      const body = {};
+      if (kind === 'register') {
+          body.name = user.value.trim();
+      } else {
+          body.username = user.value.trim();
+      }
+      if (pass) body.password = pass.value;
+      const res = await fetch(AUTH_API + '/' + kind, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        if (kind === 'login') {
+          f.reset();
+          // Flask réinitialise la session après la connexion : récupérer un nouveau jeton.
+          await refreshCsrfToken();
+          await enterApp({ username: data.username || body.username });
+        } else if (kind === 'register') {
+          f.reset();
+          authShow('login', 'Compte créé. Vous pouvez maintenant vous connecter.');
+        } else {
+          f.reset();
+          authShow('login', 'Si ce compte existe, un lien de réinitialisation a été envoyé.');
+        }
+      } else if (res.status === 401) {
+        formErr.textContent = "Nom d'utilisateur ou mot de passe incorrect.";
+      } else if (res.status === 409) {
+        authSetErr(user, "Ce nom d'utilisateur est déjà pris.");
+      } else if (res.status === 429) {
+        formErr.textContent = 'Trop de tentatives. Réessayez dans quelques minutes.';
+      } else {
+        formErr.textContent = data.error || 'Une erreur est survenue. Réessayez.';
+      }
+    } catch (err) {
+      console.error(err);
+      formErr.textContent = 'Serveur injoignable. Vérifiez votre connexion.';
+    } finally {
+      btn.disabled = false;
+    }
+  }));
+
+  function enterApp(user) {
+    auth.user = user;
+    $auth.hidden = true;
+    sideUser.textContent = user.username;
+    return loadApp();
+  }
+
+  function endSession(msg) {
+    auth.user = null;
+    state.lists = [];
+    state.tasks = [];
+    state.view = 'myday';
+    state.search = '';
+    state.selectedId = null;
+    searchInput.value = '';
+    $main.replaceChildren();
+    $detail.replaceChildren();
+    $detail.hidden = true;
+    $auth.querySelectorAll('form').forEach((f) => f.reset());
+    authShow('login', msg);
+  }
+
   // ---------- Icons (constant markup only, never user text) ----------
   const ICONS = {
     plus: '<path d="M12 5v14M5 12h14"/>',
@@ -233,6 +405,22 @@
   const navEl = el('nav', { class: 'nav' });
   const newListInput = el('input', { type: 'text', placeholder: 'Nouvelle liste', 'aria-label': 'Nouvelle liste', autocomplete: 'off' });
   const newListForm = el('form', { class: 'new-list' }, el('span', { class: 'nav-icon' }, icon('plus')), newListInput);
+
+  // Utilisateur connecté + bouton de déconnexion (bas de la barre latérale)
+  const sideUser = el('span', { class: 'side-user' });
+  const logoutBtn = el('button', { class: 'side-logout', type: 'button' }, 'Se déconnecter');
+  const sideFoot = el('div', { class: 'side-foot' }, sideUser, logoutBtn);
+  logoutBtn.addEventListener('click', async () => {
+    try {
+      await fetch(AUTH_API + '/logout', { method: 'POST' });
+    } catch (err) {
+      console.error(err);
+    }
+
+    // La déconnexion réinitialise la session côté serveur.
+    csrfToken = null;
+    endSession();
+  });
 
   const els = { header: null, scroll: null, add: null };
 
@@ -683,12 +871,8 @@
     state.selectedId = null;
     showToast('Tâche supprimée', async () => {
       const response = await fetch(`/api/v1/tasks/${task.id}/restore`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({})
-    });
+        method: 'POST'
+      });
 
       if (!response.ok) {
           console.error("Erreur lors de la restauration :", response.status);
@@ -729,12 +913,8 @@ async function deleteList(list) {
 
   showToast('Liste supprimée', async () => {
     const response = await fetch(`/api/v1/lists/${list.id}/restore`, {
-      method: 'POST',
-      headers: {
-          'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({})
-  });
+      method: 'POST'
+    });
 
     if (!response.ok) {
       console.error("Erreur lors de la restauration de la liste :", response.status);
@@ -1299,8 +1479,7 @@ document.addEventListener('focusin', (e) => {
   });
 
   // ---------- Init ----------
-  async function init() 
-  {
+  async function loadApp() {
   // Récupérer les listes depuis SQLite
   const responseLists = await fetch('/api/v1/lists');
 
@@ -1329,8 +1508,25 @@ document.addEventListener('focusin', (e) => {
   els.add = el('form', { class: 'add-task' },
       el('span', { class: 'add-icon' }, icon('plus')),
       el('input', { type: 'text', placeholder: 'Ajouter une tâche', 'aria-label': 'Ajouter une tâche', autocomplete: 'off' }));
-    $sidebar.replaceChildren(sideHead, navEl, newListForm);
+    $sidebar.replaceChildren(sideHead, navEl, newListForm, sideFoot);
     render();
+  }
+
+  // Au chargement : session déjà ouverte ? sinon écran de connexion.
+  async function init() {
+    try {
+      // Obtenir le jeton avant toute requête qui pourrait modifier des données.
+      await refreshCsrfToken();
+
+      const res = await nativeFetch(AUTH_API + '/me');
+      if (res.ok) {
+        await enterApp(await res.json());
+        return;
+      }
+    } catch (err) {
+      console.error(err);
+    }
+    authShow('login');
   }
 
   init();

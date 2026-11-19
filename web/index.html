@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Mes tâches</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/script.js" defer></script>
@@ -13,5 +13,100 @@
   <main id="main"></main>
   <aside id="detail" aria-label="Détail de la tâche" hidden></aside>
   <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Écran de connexion (affiché par script.js tant que l'utilisateur n'est pas connecté) -->
+  <div id="auth" hidden>
+    <div class="a-shell">
+      <aside class="a-side">
+        <div class="a-logo">
+          <i><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg></i>
+          Mes tâches
+        </div>
+        <div>
+          <h2>Vos tâches, vos règles.</h2>
+          <p>Connectez-vous pour retrouver votre liste personnelle, où que vous soyez.</p>
+        </div>
+        <div class="a-tasks" aria-hidden="true">
+          <div class="a-task is-done"><b><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></b><span>Créer mon compte</span></div>
+          <div class="a-task"><b></b><span>Ajouter ma première tâche</span></div>
+        </div>
+      </aside>
+
+      <div class="a-main">
+        <!-- Connexion -->
+        <section class="a-view" id="a-login">
+          <h1>Connexion</h1>
+          <p class="a-sub">Heureux de vous revoir.</p>
+          <div class="a-ok" id="a-ok" role="status" hidden></div>
+          <form novalidate data-form="login">
+            <div class="a-field">
+              <label for="l-user">Nom d'utilisateur</label>
+              <input id="l-user" name="user" type="text" placeholder="Entrer votre nom" autocomplete="username">
+              <div class="a-err" role="alert"></div>
+            </div>
+            <div class="a-field">
+              <label for="l-pass">Mot de passe</label>
+              <div class="a-input">
+                <input id="l-pass" name="pass" type="password" placeholder="Entrer votre mot de passe" autocomplete="current-password">
+                <button type="button" class="a-eye" data-eye="l-pass">Afficher</button>
+              </div>
+              <div class="a-err" role="alert"></div>
+            </div>
+            <div class="a-err a-form-err" role="alert"></div>
+            <button class="a-btn" type="submit">Se connecter</button>
+          </form>
+          <div class="a-links">
+            <button class="a-link" type="button" data-go="forgot">Mot de passe oublié ?</button>
+            <button class="a-link" type="button" data-go="register">Créer un compte</button>
+          </div>
+        </section>
+
+        <!-- Inscription -->
+        <section class="a-view" id="a-register" hidden>
+          <h1>Créer un compte</h1>
+          <p class="a-sub">Quelques secondes suffisent.</p>
+          <form novalidate data-form="register">
+            <div class="a-field">
+              <label for="r-user">Nom d'utilisateur</label>
+              <input id="r-user" name="user" type="text" placeholder="Choisir un nom" autocomplete="username">
+              <div class="a-err" role="alert"></div>
+            </div>
+            <div class="a-field">
+              <label for="r-pass">Mot de passe</label>
+              <div class="a-input">
+                <input id="r-pass" name="pass" type="password" placeholder="8 caractères minimum" autocomplete="new-password">
+                <button type="button" class="a-eye" data-eye="r-pass">Afficher</button>
+              </div>
+              <div class="a-err" role="alert"></div>
+            </div>
+            <div class="a-field">
+              <label for="r-pass2">Confirmer le mot de passe</label>
+              <input id="r-pass2" name="pass2" type="password" placeholder="Répéter le mot de passe" autocomplete="new-password">
+              <div class="a-err" role="alert"></div>
+            </div>
+            <div class="a-err a-form-err" role="alert"></div>
+            <button class="a-btn" type="submit">Créer mon compte</button>
+          </form>
+          <div class="a-links"><button class="a-link" type="button" data-go="login">J'ai déjà un compte</button></div>
+        </section>
+
+        <!-- Mot de passe oublié -->
+        <section class="a-view" id="a-forgot" hidden>
+          <h1>Mot de passe oublié</h1>
+          <p class="a-sub">Indiquez votre nom d'utilisateur pour recevoir un lien de réinitialisation.</p>
+          <form novalidate data-form="forgot">
+            <div class="a-field">
+              <label for="f-user">Nom d'utilisateur</label>
+              <input id="f-user" name="user" type="text" placeholder="Entrer votre nom" autocomplete="username">
+              <div class="a-err" role="alert"></div>
+            </div>
+            <div class="a-err a-form-err" role="alert"></div>
+            <button class="a-btn" type="submit">Envoyer le lien</button>
+          </form>
+          <div class="a-links"><button class="a-link" type="button" data-go="login">Retour à la connexion</button></div>
+        </section>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

@@ -22,6 +22,22 @@ cur.execute("""
         FOREIGN KEY (listId) REFERENCES list(id)
     )
 """)
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS User (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        password TEXT NOT NULL
+    )
+""")
+
+def add_column_if_not_exists(cur, table, column, definition):
+    columns = [row[1] for row in cur.execute(f"PRAGMA table_info({table})")]
+
+    if column not in columns:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+add_column_if_not_exists(cur, "list", "user_id", "INTEGER")
+add_column_if_not_exists(cur, "task", "user_id", "INTEGER")
 
 cur.execute("PRAGMA table_info(list)")
 list_columns = [row[1] for row in cur.fetchall()]
