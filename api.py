@@ -12,12 +12,14 @@ import json
 import uuid
 import os
 import database
+import hashlib
+import hmac
 
 
 load_dotenv()
 ph = PasswordHasher()
 app = Flask(__name__, static_folder="web", static_url_path="")
-app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
+app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost", "192.168.216.189"]
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 # Sécurisation des cookies de session
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -31,6 +33,19 @@ app.secret_key = os.getenv("SECRET_KEY")
 if not app.secret_key:
     raise RuntimeError("La variable SECRET_KEY est absente du fichier .env")
 csrf = CSRFProtect(app)
+REGISTER_MAX_ATTEMPTS = 10
+REGISTER_WINDOW = 10 * 60
+REGISTER_BLOCK_DURATION = 48 * 60 * 60
+# Protection anti-brute-force de connexion
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_DELAYS = [
+    60,       # 1 minute
+    600,      # 10 minutes
+    1800,     # 30 minutes
+    3600,     # 1 heure
+    7200,     # 2 heures
+    14400     # 4 heures
+    ]
 
 
 #Couleur de mes themes 
@@ -61,6 +76,195 @@ def get_db_connection():
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     return con
+
+
+def check_registration_abuse():
+
+    ip = request.remote_addr or "unknown"
+
+    # Anonymisation de l'adresse IP
+    ip_hash = hmac.new(
+        app.secret_key.encode(),
+        ip.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    now = int(time.time())
+
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute(
+            "SELECT * FROM registration_security WHERE ip_hash = ?",
+            (ip_hash,)
+        )
+
+        record = cur.fetchone()
+
+        # Vérifier si l'adresse IP est déjà bloquée
+        if record and record["blocked_until"] > now:
+            remaining = record["blocked_until"] - now
+            con.commit()
+            return True, remaining
+
+        # Vérifier la période de surveillance
+        if record and now - record["window_started_at"] < REGISTER_WINDOW:
+            attempts = record["attempts"] + 1
+            window_started = record["window_started_at"]
+        else:
+            attempts = 1
+            window_started = now
+
+        blocked_until = 0
+
+        # Déclencher le blocage après 10 tentatives
+        if attempts >= REGISTER_MAX_ATTEMPTS:
+            blocked_until = now + REGISTER_BLOCK_DURATION
+
+        cur.execute(
+            """
+            INSERT INTO registration_security
+                (ip_hash, attempts, window_started_at,
+                 blocked_until, last_attempt_at)
+            VALUES (?, ?, ?, ?, ?)
+
+            ON CONFLICT(ip_hash) DO UPDATE SET
+                attempts = excluded.attempts,
+                window_started_at = excluded.window_started_at,
+                blocked_until = excluded.blocked_until,
+                last_attempt_at = excluded.last_attempt_at
+            """,
+            (
+                ip_hash,
+                attempts,
+                window_started,
+                blocked_until,
+                now
+            )
+        )
+
+        con.commit()
+
+        if blocked_until:
+            return True, REGISTER_BLOCK_DURATION
+
+        return False, 0
+
+    except Exception:
+        con.rollback()
+        raise
+
+    finally:
+        con.close()
+
+
+def register_login_failure(scope, key_hash):
+
+    now = int(time.time())
+
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute(
+            """
+            SELECT * FROM login_security
+            WHERE scope = ? AND key_hash = ?
+            """,
+            (scope, key_hash)
+        )
+
+        record = cur.fetchone()
+
+        if record and record["blocked_until"] > now:
+            con.commit()
+            return record["blocked_until"] - now
+
+        # Compteur de tentatives
+        if record and now - record["window_started_at"] < 24 * 60 * 60:
+            attempts = record["attempts"] + 1
+            window_started = record["window_started_at"]
+        else:
+            attempts = 1
+            window_started = now
+
+        blocked_until = 0
+
+        # Calcul du délai progressif
+        if scope == "ip" and attempts % LOGIN_MAX_ATTEMPTS == 0:
+            level = (attempts // LOGIN_MAX_ATTEMPTS) - 1
+            delay = LOGIN_DELAYS[min(level, len(LOGIN_DELAYS) - 1)]
+            blocked_until = now + delay
+
+        cur.execute(
+            """
+            INSERT INTO login_security
+                (scope, key_hash, attempts, window_started_at,
+                 blocked_until, last_attempt_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+
+            ON CONFLICT(scope, key_hash) DO UPDATE SET
+                attempts = excluded.attempts,
+                window_started_at = excluded.window_started_at,
+                blocked_until = excluded.blocked_until,
+                last_attempt_at = excluded.last_attempt_at
+            """,
+            (
+                scope,
+                key_hash,
+                attempts,
+                window_started,
+                blocked_until,
+                now
+            )
+        )
+
+        con.commit()
+
+        return max(0, blocked_until - now)
+
+    except Exception:
+        con.rollback()
+        raise
+
+    finally:
+        con.close()
+
+
+
+def check_login_block(scope, key_hash):
+
+    now = int(time.time())
+
+    con = get_db_connection()
+
+    try:
+        cur = con.cursor()
+
+        cur.execute(
+            """
+            SELECT blocked_until
+            FROM login_security
+            WHERE scope = ? AND key_hash = ?
+            """,
+            (scope, key_hash)
+        )
+
+        record = cur.fetchone()
+
+        if record is None:
+            return 0
+
+        return max(0, record["blocked_until"] - now)
+
+    finally:
+        con.close()
+
 
 
 # Vérifier que l'utilisateur est connecté
@@ -903,6 +1107,14 @@ def restore_list(list_id):
 @app.route("/api/v1/auth/register", methods=["POST"])
 def register():
 
+    blocked, remaining = check_registration_abuse()
+
+    if blocked:
+        return jsonify({
+            "error": "Trop de tentatives. Réessayez dans 48 heures.",
+            "retry_after": remaining
+        }), 429
+
     if not request.is_json:
         return jsonify({"error": "JSON requis"}), 415
 
@@ -967,6 +1179,22 @@ def register():
 @app.route("/api/v1/auth/login", methods=["POST"])
 def login():
 
+    ip = request.remote_addr or "unknown"
+
+    ip_hash = hmac.new(
+        app.secret_key.encode(),
+        ip.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    remaining = check_login_block("ip", ip_hash)
+
+    if remaining > 0:
+        return jsonify({
+            "error": "Trop de tentatives. Réessayez plus tard.",
+            "retry_after": remaining
+        }), 429
+
     # Vérification du format JSON
     if not request.is_json:
         return jsonify({"error": "JSON requis"}), 415
@@ -975,10 +1203,20 @@ def login():
 
     if not isinstance(data, dict):
         return jsonify({"error": "JSON invalide"}), 400
-
+    
     # Récupération des informations
     name = data.get("username")
     password = data.get("password")
+
+    account = (name.strip().casefold()
+                if isinstance(name, str) else "")
+
+    account_hash = hmac.new(
+        app.secret_key.encode(),
+        account.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
 
     # Vérification des champs
     if not name or not password:
@@ -1000,12 +1238,20 @@ def login():
 
         # Vérification de l'existence de l'utilisateur
         if user is None:
+            register_login_failure("ip", ip_hash)
+            register_login_failure("account", account_hash)
+
             return jsonify({"error": "Identifiants incorrects"}), 401
 
         # Vérification du mot de passe
         try:
             ph.verify(user["password"], password)
         except VerifyMismatchError:
+            return jsonify({"error": "Identifiants incorrects"}), 401
+        except VerifyMismatchError:
+            register_login_failure("ip", ip_hash)
+            register_login_failure("account", account_hash)
+
             return jsonify({"error": "Identifiants incorrects"}), 401
 
         # Vérification si le hachage doit être actualisé
@@ -1155,4 +1401,4 @@ def handle_unexpected_error(error):
 debug = os.getenv("DEBUG", "False").lower() == "true"
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=9080, debug=debug)
+    app.run(host="0.0.0.0", port=9080, debug=debug)
